@@ -1,0 +1,116 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isAdmin() { return isVerified() && (request.auth.token.email == 'shahmohiuddin31@gmail.com' || exists(/databases/$(database)/documents/admins/$(request.auth.uid))); }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // 2. Validation Blueprints
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+             data.keys().size() >= 4 &&
+             data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 100 &&
+             data.role in ['user', 'admin', 'technician'] &&
+             data.createdAt == request.time;
+    }
+
+    function isValidAppliance(data) {
+      return data.keys().hasAll(['ownerId', 'type']) &&
+             data.ownerId == request.auth.uid &&
+             data.type in ['AC', 'Refrigerator', 'Washing Machine', 'Dishwasher', 'Microwave', 'Other'] &&
+             (data.get('model', '') is string && data.get('model', '').size() <= 100) &&
+             (data.get('brand', '') is string && data.get('brand', '').size() <= 100);
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['userId', 'applianceId', 'serviceType', 'scheduledAt', 'status', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             isValidId(data.applianceId) &&
+             data.serviceType in ['Repair', 'Maintenance', 'Installation', 'Consultation'] &&
+             data.status in ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled'] &&
+             data.createdAt == request.time;
+    }
+
+    function isValidMessage(data, conversationId) {
+      return data.keys().hasAll(['senderId', 'createdAt']) &&
+             data.senderId == request.auth.uid &&
+             data.createdAt == request.time &&
+             (data.get('text', '') is string && data.get('text', '').size() <= 2000);
+    }
+
+    function isValidConversation(data) {
+      return data.keys().hasAll(['participants', 'status', 'userId']) &&
+             data.userId == request.auth.uid &&
+             data.status in ['active', 'closed'] &&
+             data.participants.size() >= 1 &&
+             data.participants.hasAny([request.auth.uid]);
+    }
+
+    // 3. Match Blocks
+    
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isVerified() && isValidId(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phoneNumber', 'role']) == false && (
+        // Only allow non-critical fields for now
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phoneNumber'])
+      );
+    }
+
+    // Appliances Collection
+    match /appliances/{applianceId} {
+      allow get: if isSignedIn() && (isOwner(existing().ownerId) || isAdmin());
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && isValidAppliance(incoming());
+      allow update: if isOwner(existing().ownerId) && isValidAppliance(incoming()) && incoming().ownerId == existing().ownerId;
+      allow delete: if isOwner(existing().ownerId);
+    }
+
+    // Bookings Collection
+    match /bookings/{bookingId} {
+      allow get: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidBooking(incoming()) && exists(/databases/$(database)/documents/appliances/$(incoming().applianceId));
+      allow update: if (isOwner(existing().userId) || isAdmin()) && isValidBooking(incoming()) && (
+        (isOwner(existing().userId) && existing().status == 'pending' && incoming().diff(existing()).affectedKeys().hasOnly(['scheduledAt', 'description', 'serviceType', 'status']) && (incoming().status == 'cancelled' || incoming().status == 'pending')) ||
+        (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'technicianId', 'updatedAt']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Conversations Collection
+    match /conversations/{conversationId} {
+      allow get: if isSignedIn() && (existing().participants.hasAny([request.auth.uid]) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.participants.hasAny([request.auth.uid]) || isAdmin());
+      allow create: if isVerified() && isValidConversation(incoming());
+      allow update: if (existing().participants.hasAny([request.auth.uid]) || isAdmin()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'status'])
+      );
+    }
+
+    // Messages Collection (Subcollection of Conversations)
+    match /conversations/{conversationId}/messages/{messageId} {
+      allow list: if isSignedIn() && (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants.hasAny([request.auth.uid]) || isAdmin());
+      allow create: if isVerified() && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants.hasAny([request.auth.uid]) && isValidMessage(incoming(), conversationId);
+    }
+
+    // Admins Collection
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if false; // Managed manually or via server
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "FixIt Support",
+  "description": "Tech support for home appliances with real-time chat and booking.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "Firebase Auth",
+    "Firestore Real-time",
+    "Chat Support",
+    "Service Booking"
+  ]
+}
